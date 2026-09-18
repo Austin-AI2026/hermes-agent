@@ -63,11 +63,11 @@ import { ToolsetConfigPanel } from '../settings/toolset-config-panel'
 import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
 
 import { CapabilityTabs, type CapabilityView } from './capability-tabs'
-import { McpTab } from './mcp-tab'
-import { PluginActions, PluginsTab } from './plugins-tab'
-import { SkillCatalog } from './skill-catalog'
+import { McpTab } from './mcp/mcp-tab'
+import { PluginActions, PluginsTab } from './plugins/plugins-tab'
+import { SkillCatalog } from './skills/skill-catalog'
+import { UpdateSkillsButton } from './skills/update-skills-button'
 import { $skillsSortDesc, $toolsetsSortDesc } from './store'
-import { UpdateSkillsButton } from './update-skills-button'
 
 // Skills Hub browsing lives inside the Skills tab. Legacy `?tab=hub`
 // links fall back to 'skills' via useRouteEnumParam.
@@ -187,7 +187,7 @@ function filteredToolsets(
 
 const visibleToolsetCount = (toolsets: ToolsetInfo[]) => toolsets.filter(ts => isDesktopToolsetVisible(ts.name)).length
 
-interface SkillsViewProps extends React.ComponentProps<'section'> {
+interface CapabilitiesViewProps extends React.ComponentProps<'section'> {
   setStatusbarItemGroup?: SetStatusbarItemGroup
   /** Embedded mode (plugin dialogs — e.g. Bot Mode's Advanced section): tab
    *  state lives in local React state instead of the route's `?tab=` param,
@@ -205,13 +205,13 @@ interface SkillsViewProps extends React.ComponentProps<'section'> {
   fixedConnection?: string
 }
 
-export function SkillsView({
+export function CapabilitiesView({
   embedded = false,
   fixedConnection,
   fixedProfile,
   setStatusbarItemGroup: _setStatusbarItemGroup,
   ...props
-}: SkillsViewProps) {
+}: CapabilitiesViewProps) {
   const { t } = useI18n()
   // Both hooks run unconditionally (rules of hooks); embedded picks the local
   // one so tab clicks inside a dialog don't rewrite the page URL.
@@ -966,12 +966,12 @@ export function SkillsView({
 }
 
 // Feature-detection flag for plugins (Bot Mode): TRUE means this build's
-// SkillsView routes `fixedConnection` to the pinned connection's backend.
-// Older builds export SkillsView WITHOUT the prop — passing it there would
+// CapabilitiesView routes `fixedConnection` to the pinned connection's backend.
+// Older builds export CapabilitiesView WITHOUT the prop — passing it there would
 // silently read/write the ACTIVE gateway under the remote bot's profile name,
 // which is exactly the wrong-machine bug the prop exists to prevent. A static
 // property is probe-able without rendering.
-SkillsView.supportsFixedConnection = true as const
+CapabilitiesView.supportsFixedConnection = true as const
 
 // Shared inspector header — mirrors Messaging's PlatformDetail so Skills and
 // Tools share one title/description block and tab switches don't jump.

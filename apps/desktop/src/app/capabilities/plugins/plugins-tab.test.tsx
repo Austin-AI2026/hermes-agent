@@ -9,12 +9,12 @@ import { $agentPlugins, $agentPluginsStatus } from '@/store/agent-plugins'
 import { $pluginInstallRequest, closePluginInstallRequest } from '@/store/plugin-install-request'
 import { $connection } from '@/store/session'
 
-import { PageSearchShell } from '../page-search-shell'
+import { PageSearchShell } from '../../page-search-shell'
+import { CapabilityTabs } from '../capability-tabs'
+import { parseCatalog } from '../catalog/catalog-data'
+import { $catalogCardView } from '../store'
 
-import { CapabilityTabs } from './capability-tabs'
-import { parseCatalog } from './catalog-data'
 import { PluginActions, PluginsTab } from './plugins-tab'
-import { $catalogCardView } from './store'
 
 const requestGateway = vi.fn(async () => ({ plugins: $agentPlugins.get() }))
 
@@ -28,7 +28,7 @@ const connectionFixture = {
   wsUrl: ''
 }
 
-// SkillsView owns navigation and search; exercise that controlled contract
+// CapabilitiesView owns navigation and search; exercise that controlled contract
 // with the same primitives instead of giving PluginsTab private controls.
 function PluginsHarness({
   view: initialView = 'installed',
@@ -328,6 +328,7 @@ describe('PluginsTab', () => {
       repo: 'https://github.com/example/plugins-monorepo',
       subdir: 'packages/nested-plugin'
     }
+
     seedCatalog([entry])
     renderPlugins({ profile: null })
 
@@ -359,6 +360,7 @@ describe('PluginsTab catalog UX', () => {
       ok: true,
       json: async () => [weatherEntry, { ...weatherEntry, name: 'garden-plugin', category: 'garden', description: 'Garden planning' }]
     })
+
     vi.stubGlobal('fetch', fetchCatalog)
     await act(async () => { renderPlugins({ profile: null }) })
 
@@ -388,6 +390,7 @@ describe('PluginsTab catalog UX', () => {
     const fetchCatalog = vi.fn()
       .mockResolvedValueOnce({ ok: false, status: 503 })
       .mockResolvedValue({ ok: true, json: async () => [weatherEntry] })
+
     vi.stubGlobal('fetch', fetchCatalog)
     await act(async () => { renderPlugins({ profile: null }) })
     fireEvent.click(screen.getByRole('button', { name: 'Browse' }))
