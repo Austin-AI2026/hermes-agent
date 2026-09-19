@@ -1,10 +1,13 @@
-"""Tests for MAKE-120: auxiliary.compression.allow_main_fallback config guard.
+"""Tests for MAKE-120: auxiliary allow_main_fallback config guard.
 
-When auxiliary.compression.allow_main_fallback=false, compression tasks must NOT
-escalate to the main agent model — neither via the generic aux safety net
+When auxiliary.<task>.allow_main_fallback=false, that task must NOT escalate
+to the main agent model — neither via the generic aux safety net
 (auxiliary_client._ladder_provider_fallback's _try_main_agent_model_fallback)
 nor the compressor's one-shot main-model retry
 (context_compressor._on_summary_failure -> _fallback_to_main_for_compression).
+
+The guard is per-task: compression can disable fallback without affecting
+vision, skills_hub, or other auxiliary tasks.
 
 Default (unset/true) preserves the existing main-model fallback behavior.
 No live model inference is performed — all LLM calls are mocked.
@@ -84,8 +87,8 @@ def _aux_patches(stack, primary, task_config):
     return chain_mock, main_mock
 
 
-class TestAuxCompressionAllowMainFallback:
-    """The generic aux main-agent-model safety net is gated for compression."""
+class TestAuxiliaryAllowMainFallback:
+    """The generic aux main-agent-model safety net can be gated per task."""
 
     def _failing_primary(self):
         primary = MagicMock()
@@ -209,26 +212,123 @@ class TestAuxCompressionAllowMainFallback:
 
         main_mock.assert_not_called()
 
-    def test_false_does_not_affect_other_aux_tasks(self):
-        """allow_main_fallback=false (in compression config) does NOT gate
-        main-agent-model fallback for non-compression tasks (e.g., vision)."""
+    def test_false_prevents_main_fallback_for_noncompression_task(self):
+        """The generalized guard applies to ordinary auxiliary tasks too."""
         primary = self._failing_primary()
-        main_fb = MagicMock()
-        main_fb.base_url = "https://api.openai.com/v1"
-        main_fb.chat.completions.create.return_value = {"summary": "via main model"}
 
         with ExitStack() as stack:
             chain_mock, main_mock = _aux_patches(
                 stack, primary,
                 task_config={"allow_main_fallback": False})
+            with pytest.raises(_CapacityError):
+                call_llm(
+                    task="monitor",
+                    messages=[{"role": "user", "content": "score"}],
+                )
+
+        chain_mock.assert_called_once()
+        main_mock.assert_not_called()
+
+    def test_noncompression_default_unset_preserves_main_fallback(self):
+        """Absent allow_main_fallback preserves legacy behavior for ordinary aux tasks."""
+        primary = self._failing_primary()
+        main_fb = MagicMock()
+        main_fb.base_url = "https://api.openai.com/v1"
+        main_fb.chat.completions.create.return_value = {"score": 7}
+
+        with ExitStack() as stack:
+            chain_mock, main_mock = _aux_patches(
+                stack, primary, task_config={})
             main_mock.return_value = (main_fb, "main-model", "main_agent")
+            result = call_llm(
+                task="monitor",
+                messages=[{"role": "user", "content": "score"}],
+            )
+
+        main_mock.assert_called_once()
+        assert result == {"score": 7}
+
+    def test_noncompression_explicit_true_preserves_main_fallback(self):
+        """Explicit true preserves legacy fallback for ordinary auxiliary tasks."""
+        primary = self._failing_primary()
+        main_fb = MagicMock()
+        main_fb.base_url = "https://api.openai.com/v1"
+        main_fb.chat.completions.create.return_value = {"score": 8}
+
+        with ExitStack() as stack:
+            chain_mock, main_mock = _aux_patches(
+                stack, primary,
+                task_config={"allow_main_fallback": True})
+            main_mock.return_value = (main_fb, "main-model", "main_agent")
+            result = call_llm(
+                task="monitor",
+                messages=[{"role": "user", "content": "score"}],
+            )
+
+        main_mock.assert_called_once()
+        assert result == {"score": 8}
+
+    def test_noncompression_false_still_uses_configured_fallback_chain(self):
+        """The generalized guard does not suppress an explicit task fallback_chain."""
+        primary = self._failing_primary()
+        chain_client = MagicMock()
+        chain_client.base_url = "https://openrouter.ai/api/v1"
+        chain_client.chat.completions.create.return_value = {"score": 6}
+
+        chain_entry = {
+            "provider": "openrouter",
+            "model": "google/gemini-3.6-flash",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "or-key",
+            "timeout": 120,
+        }
+
+        with ExitStack() as stack:
+            chain_mock, main_mock = _aux_patches(
+                stack, primary,
+                task_config={
+                    "allow_main_fallback": False,
+                    "fallback_chain": [chain_entry],
+                })
+            chain_mock.return_value = (
+                chain_client, "gemini-3.6-flash", "fallback_chain[0]")
+            result = call_llm(
+                task="monitor",
+                messages=[{"role": "user", "content": "score"}],
+            )
+
+        chain_mock.assert_called_once()
+        main_mock.assert_not_called()
+        assert result == {"score": 6}
+
+    def test_allow_main_fallback_is_task_local(self):
+        """Disabling monitor fallback must not disable fallback for another task."""
+        primary = self._failing_primary()
+        main_fb = MagicMock()
+        main_fb.base_url = "https://api.openai.com/v1"
+        main_fb.chat.completions.create.return_value = {"description": "ok"}
+
+        with ExitStack() as stack:
+            chain_mock, main_mock = _aux_patches(
+                stack, primary, task_config={})
+
+            def task_config(task):
+                if task == "monitor":
+                    return {"allow_main_fallback": False}
+                return {}
+
+            stack.enter_context(patch(
+                "agent.auxiliary_client._get_auxiliary_task_config",
+                side_effect=task_config))
+            main_mock.return_value = (main_fb, "main-model", "main_agent")
+
             result = call_llm(
                 task="vision",
                 messages=[{"role": "user", "content": "describe"}],
             )
 
         main_mock.assert_called_once()
-        assert result == {"summary": "via main model"}
+        assert result == {"description": "ok"}
 
 
 # ── Level 2: context_compressor._on_summary_failure guard ────────────

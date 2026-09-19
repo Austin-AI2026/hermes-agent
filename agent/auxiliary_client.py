@@ -6044,25 +6044,27 @@ def _get_auxiliary_task_config(task: str) -> Dict[str, Any]:
     return task_config
 
 
-def _compression_allow_main_fallback() -> bool:
-    """Whether a failed compression summary may escalate to the main agent model.
+def _auxiliary_allow_main_fallback(task: Optional[str]) -> bool:
+    """Whether an auxiliary task may escalate to the main agent model.
 
-    Covers two escalation surfaces:
-      1. auxiliary_client._ladder_provider_fallback's _try_main_agent_model_fallback
-         (the generic aux safety net for ALL aux tasks).
-      2. context_compressor._on_summary_failure's one-shot main-model retry via
-         _fallback_to_main_for_compression.
-
-    Returns True (existing behavior) when the key is absent, null, or any truthy
-    value. Only an explicit false disables escalation. On config-read failure,
-    preserves the legacy fallback behavior by returning True.
+    Returns True (existing behavior) when the task is absent, the key is absent
+    or null, or any truthy value is configured. Only an explicit false disables
+    escalation. On config-read failure, preserves the legacy fallback behavior
+    by returning True.
     """
+    if not task:
+        return True
     try:
-        cfg = _get_auxiliary_task_config("compression")
+        cfg = _get_auxiliary_task_config(task)
     except Exception:
         return True
     val = cfg.get("allow_main_fallback", True)
     return val is not False
+
+
+def _compression_allow_main_fallback() -> bool:
+    """Compatibility wrapper for compression's two main-model fallback surfaces."""
+    return _auxiliary_allow_main_fallback("compression")
 
 
 class CompressionFastLane(NamedTuple):
@@ -7505,14 +7507,15 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
                 resolved_provider, task, reason=reason, failed_base_url=route.base_info,
                 failure_scope=_chain_failure_scope, main_runtime=route.main_runtime)
     elif fb_client is None and not explicit_auth_with_task_chain:
-        # Compression can opt out of the main-agent-model safety net via
-        # auxiliary.compression.allow_main_fallback=false. The configured
-        # fallback_chain (and auto/payment chains above) are still consulted —
-        # only the final escalation to the main agent model is gated.
-        if task == "compression" and not _compression_allow_main_fallback():
+        # Any auxiliary task can opt out of the main-agent-model safety net via
+        # auxiliary.<task>.allow_main_fallback=false. The configured fallback_chain
+        # (and auto/payment chains above) are still consulted — only the final
+        # escalation to the main agent model is gated.
+        if task and not _auxiliary_allow_main_fallback(task):
             logger.info(
-                "Auxiliary compression: main-agent-model fallback disabled "
-                "(auxiliary.compression.allow_main_fallback=false); failing closed.",
+                "Auxiliary %s: main-agent-model fallback disabled "
+                "(auxiliary.%s.allow_main_fallback=false); failing closed.",
+                task, task,
             )
             return None
         fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
