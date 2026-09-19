@@ -1542,6 +1542,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
     opts = _resolve_update_options(args, gateway_mode)
     gw_input_fn, assume_yes = opts.gw_input_fn, opts.assume_yes
 
+    # A child spawned off hermes.exe already outwaited its parent in ``cmd_update`` (before the
+    # update lock, so the lock it now holds is its own — the parent's marker left with it).
+    from hermes_cli.update_handoff import adopt_handed_off_gateway_resume
+
     if getattr(args, "post_swap", None):
         # Second half of a run whose pre-pull interpreter stopped at the code swap.
         _run_post_swap_phase(args, gateway_mode)
@@ -1558,7 +1562,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
     pre_update_snapshot_id = _m()._run_pre_update_backup(args)
     _record_pre_update_backup_outcome(args, pre_update_snapshot_id)
 
-    _windows_gateway_resume = _m()._pause_windows_gateways_for_update()
+    # A legacy re-exec child resumes exactly the fleet its parent stopped; re-running discovery
+    # here found the parent's just-relaunched gateway and force-killed it (#101600).
+    _windows_gateway_resume = adopt_handed_off_gateway_resume() or _m()._pause_windows_gateways_for_update()
     if _windows_gateway_resume:
         import atexit as _atexit
         _atexit.register(_m()._resume_windows_gateways_after_update, _windows_gateway_resume)
