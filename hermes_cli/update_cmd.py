@@ -1534,10 +1534,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
     opts = _resolve_update_options(args, gateway_mode)
     gw_input_fn, assume_yes = opts.gw_input_fn, opts.assume_yes
 
-    # A child spawned off hermes.exe: the parent still holds the shim (and the venv python)
-    # until it exits — nothing below may scan holders, pause gateways or rename shims before.
-    from hermes_cli.update_handoff import adopt_handed_off_gateway_resume, wait_for_shim_parent_exit
-    wait_for_shim_parent_exit()
+    # A child spawned off hermes.exe already outwaited its parent in ``cmd_update`` (before the
+    # update lock, so the lock it now holds is its own — the parent's marker left with it).
+    from hermes_cli.update_handoff import adopt_handed_off_gateway_resume
 
     if getattr(args, "post_swap", None):
         # Second half of a run whose pre-pull interpreter stopped at the code swap.
