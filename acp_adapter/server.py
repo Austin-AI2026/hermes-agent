@@ -295,9 +295,11 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         """Authenticated providers + models, from the shared Hermes inventory (same substrate
         as ``hermes model``/TUI/dashboard) so the selector isn't just the current curated list."""
         model = str(state.model or getattr(state.agent, "model", "") or "").strip()
-        provider = getattr(state.agent, "provider", None) or detect_provider() or "openrouter"
+        # The picker shows the REQUESTED route; the live agent may be serving an automatic fallback.
+        provider = state.requested_provider or getattr(state.agent, "provider", None) or detect_provider() or "openrouter"
+        base_url = state.requested_base_url or getattr(state.agent, "base_url", "")
         try:
-            picker = build_model_state(model, provider, str(getattr(state.agent, "base_url", "") or ""))
+            picker = build_model_state(model, provider, str(base_url or ""))
             if picker is not None:
                 return picker
         except Exception:
@@ -322,14 +324,17 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         from hermes_cli.model_switch import switch_model
         from hermes_cli.models import parse_model_input
 
-        current_provider = getattr(state.agent, "provider", None)
+        # Seed from the REQUESTED route: during an automatic fallback the live agent's provider, endpoint and
+        # credential belong to the fallback and must not decide how a bare model name resolves or what is kept.
+        current_provider = state.requested_provider or getattr(state.agent, "provider", None)
+        live_is_requested = getattr(state.agent, "provider", None) == current_provider
         explicit_provider, model_input = parse_model_input(raw_model, "")
         cfg = load_config()
         result = switch_model(
             raw_input=model_input, explicit_provider=explicit_provider,
             current_provider=current_provider or "openrouter", current_model=str(state.model or ""),
-            current_base_url=str(getattr(state.agent, "base_url", "") or ""),
-            current_api_key=str(getattr(state.agent, "api_key", "") or ""),
+            current_base_url=str(state.requested_base_url or ""),
+            current_api_key=str(getattr(state.agent, "api_key", "") or "") if live_is_requested else "",
             user_providers=cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {},
             custom_providers=get_compatible_custom_providers(cfg))
         if not result.success:
@@ -338,9 +343,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         state.model = new_model
         endpoint: dict[str, Any] = {}
         if keep_endpoint and not (current_provider and target_provider != current_provider):
-            endpoint = {
-                "base_url": getattr(state.agent, "base_url", None), "api_mode": getattr(state.agent, "api_mode", None)
-            }
+            endpoint = {"base_url": state.requested_base_url, "api_mode": state.requested_api_mode}
         # ACP-provided MCP servers live only on the running agent's toolsets (``_register_session_mcp_servers``);
         # a rebuild that re-derived them from config would silently drop every session MCP tool (#42719).
         state.agent = self.session_manager._make_agent(
@@ -349,6 +352,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             enabled_toolsets=getattr(state.agent, "enabled_toolsets", None),
             disabled_toolsets=getattr(state.agent, "disabled_toolsets", None),
         )
+        state.bind_requested_route()  # explicit switch: the new coherent route becomes the requested one
         self.session_manager.save_session(state.session_id)
         return current_provider, target_provider, new_model
 

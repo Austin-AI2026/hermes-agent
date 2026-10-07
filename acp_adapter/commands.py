@@ -122,7 +122,7 @@ class SlashCommandsMixin:
     def _cmd_model(self, args: str, state: SessionState) -> str:
         if not args:
             model = state.model or getattr(state.agent, "model", "unknown")
-            provider = getattr(state.agent, "provider", None) or "auto"
+            provider = state.requested_provider or getattr(state.agent, "provider", None) or "auto"
             return f"Current model: {model}\nProvider: {provider}"
 
         current_provider, target_provider, new_model = self._switch_model(state, args)

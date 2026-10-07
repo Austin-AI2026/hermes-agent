@@ -117,6 +117,51 @@ def _parse_model_config(mc: Any) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
+def _resolve_persisted_route(meta: dict, row: dict, model: str | None) -> tuple[str | None, str | None, str | None]:
+    """Requested ``(provider, base_url, api_mode)`` for a persisted ACP row, validated before any agent is built.
+
+    Rows written under ``ROUTE_SCHEMA`` hold the requested route and are trusted. Legacy rows snapshotted the LIVE
+    agent next to the requested model, so a fallback provider may sit beside a primary-only model. Evidence of that
+    is a provider that is a configured fallback (not the configured primary) with a model that is not that
+    fallback's own. Such a row is repaired only when the model is the configured default (the route is then
+    recomputed from config alone); otherwise it fails closed rather than guessing. Nothing here calls a provider."""
+    provider = meta.get("provider") or row.get("billing_provider")
+    base_url = meta.get("base_url") or row.get("billing_base_url")
+    api_mode = meta.get("api_mode") or None
+    if meta.get("route_schema") == ROUTE_SCHEMA or not meta.get("provider"):
+        return provider, base_url, api_mode
+
+    from hermes_cli.config import load_config
+    from hermes_cli.fallback_config import get_fallback_chain
+    from hermes_cli.models import normalize_provider
+
+    config = load_config()
+    model_cfg = config.get("model")
+    cfg_model, cfg_provider = "", None
+    if isinstance(model_cfg, dict):
+        cfg_model, cfg_provider = str(model_cfg.get("default") or ""), model_cfg.get("provider")
+    elif isinstance(model_cfg, str):
+        cfg_model = model_cfg.strip()
+    norm = lambda p: normalize_provider(p) if p else None  # noqa: E731
+    fallback_entries = [(norm(e.get("provider")), str(e.get("model") or "").strip()) for e in get_fallback_chain(config)]
+    live = norm(provider)
+    hybrid = (
+        live != norm(cfg_provider)
+        and any(p == live for p, _m in fallback_entries)
+        and not any(p == live and m == (model or "") for p, m in fallback_entries)
+    )
+    if not hybrid:
+        return provider, base_url, api_mode
+    if cfg_provider and model and model == cfg_model:
+        logger.warning("ACP legacy route %s+%s is a fallback-provider hybrid; restoring configured route %s+%s",
+                       provider, model, cfg_provider, model)
+        return cfg_provider, None, None
+    raise SessionRouteError(
+        f"Cannot restore ACP session: persisted route {provider!r} + model {model!r} mixes a fallback provider "
+        "with a model it does not serve, and the original route cannot be recovered from configuration. "
+        "Start a new session or select the intended model explicitly.")
+
+
 def _session_info(sid: str, cwd: str, model: Any, history_len: int, title: Any, preview: Any,
                   updated_at: Any) -> Dict[str, Any]:
     return {"session_id": sid, "cwd": cwd, "model": model, "history_len": history_len,
@@ -136,6 +181,12 @@ class SessionState:
     agent: Any  # AIAgent instance
     cwd: str = "."
     model: str = ""
+    # ``model`` is the REQUESTED model; the fields below are the rest of the requested route. Together they are
+    # the route the user (or config) chose, bound from a freshly built agent and rebound only by an explicit
+    # model switch. Automatic fallback rewrites the LIVE agent's route and must never reach these.
+    requested_provider: str | None = None
+    requested_base_url: str | None = None
+    requested_api_mode: str | None = None
     history: List[Dict[str, Any]] = field(default_factory=list)
     cancel_event: Any = None  # threading.Event
     is_running: bool = False
@@ -146,6 +197,25 @@ class SessionState:
     # Per-session allocator for ACP assistant messageIds (lazily created by
     # the server so streamed chunks group into distinct assistant replies).
     message_ids: Any = None
+
+    def bind_requested_route(self) -> None:
+        """Capture the agent's current provider/base_url/api_mode as the requested route (with ``model``).
+
+        Only valid on an agent built from the requested route — create, fork, restore, explicit model switch.
+        Never call it after an automatic fallback: the live agent then serves the fallback route."""
+        for attr in _ROUTE_FIELDS:
+            value = getattr(self.agent, attr, None)
+            setattr(self, f"requested_{attr}", value.strip() if isinstance(value, str) and value.strip() else None)
+
+
+class SessionRouteError(RuntimeError):
+    """A persisted session route cannot be established unambiguously; restoring it would risk an invalid pair."""
+
+
+# Route fields persisted next to the requested ``model``. ``ROUTE_SCHEMA`` marks rows whose route fields are the
+# REQUESTED route; unmarked (legacy) rows snapshot the live agent and may hold a fallback provider.
+_ROUTE_FIELDS = ("provider", "base_url", "api_mode")
+ROUTE_SCHEMA = 2
 
 
 class SessionManager:
@@ -187,7 +257,9 @@ class SessionManager:
         if original is None:
             return None
         new_id = str(uuid.uuid4())
-        agent = self._make_agent(session_id=new_id, cwd=cwd, model=original.model or None)
+        agent = self._make_agent(
+            session_id=new_id, cwd=cwd, model=original.model or None, requested_provider=original.requested_provider,
+            base_url=original.requested_base_url, api_mode=original.requested_api_mode)
         model = getattr(agent, "model", original.model) or original.model
         state = self._install_state(new_id, agent, cwd, model, copy.deepcopy(original.history))
         logger.info("Forked ACP session %s -> %s", session_id, new_id)
@@ -261,6 +333,7 @@ class SessionManager:
         """Build a SessionState, register it in memory, bind its cwd for tools, optionally persist."""
         state = SessionState(session_id=session_id, agent=agent, cwd=cwd, model=model,
                              history=history, cancel_event=threading.Event())
+        state.bind_requested_route()
         with self._lock:
             self._sessions[session_id] = state
         _register_task_cwd(session_id, cwd)
@@ -290,11 +363,13 @@ class SessionManager:
 
         # Ensure model is a plain string (not a MagicMock or other proxy).
         model_str = str(state.model) if state.model else None
-        session_meta = {"cwd": state.cwd}
-        for key in ("provider", "base_url", "api_mode"):
-            value = getattr(state.agent, key, None)
-            if isinstance(value, str) and value.strip():
-                session_meta[key] = value.strip()
+        # The REQUESTED route, never the live agent's: after an automatic fallback the agent serves a different
+        # provider/base_url/api_mode, and writing those beside the requested model persists an invalid pair.
+        session_meta: Dict[str, Any] = {"cwd": state.cwd, "route_schema": ROUTE_SCHEMA}
+        for key in _ROUTE_FIELDS:
+            value = getattr(state, f"requested_{key}")
+            if value:
+                session_meta[key] = value
 
         try:
             if db.get_session(state.session_id) is None:
@@ -357,11 +432,12 @@ class SessionManager:
             logger.warning("Failed to load messages for ACP session %s", session_id, exc_info=True)
             history = []
 
+        # Raises SessionRouteError for a legacy row whose route cannot be established unambiguously.
+        provider, base_url, api_mode = _resolve_persisted_route(meta, row, model)
         try:
             agent = self._make_agent(
-                session_id=session_id, cwd=cwd, model=model, api_mode=meta.get("api_mode") or None,
-                requested_provider=meta.get("provider") or row.get("billing_provider"),
-                base_url=meta.get("base_url") or row.get("billing_base_url"))
+                session_id=session_id, cwd=cwd, model=model, api_mode=api_mode,
+                requested_provider=provider, base_url=base_url)
         except Exception:
             logger.warning("Failed to recreate agent for ACP session %s", session_id, exc_info=True)
             return None

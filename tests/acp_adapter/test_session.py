@@ -330,7 +330,7 @@ class TestPersistence:
         manager.save_session(state.session_id)
 
         mc = json.loads(db.get_session(state.session_id)["model_config"])
-        assert mc == {"cwd": "/work", "provider": "anthropic",
+        assert mc == {"cwd": "/work", "route_schema": acp_session.ROUTE_SCHEMA, "provider": "anthropic",
                       "base_url": "https://anthropic.example/v1", "api_mode": "anthropic_messages"}
 
 
