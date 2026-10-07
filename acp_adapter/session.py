@@ -382,6 +382,7 @@ class SessionManager:
 
         from run_agent import AIAgent
         from hermes_cli.config import load_config
+        from hermes_cli.fallback_config import get_fallback_chain
         from hermes_cli.runtime_provider import resolve_runtime_provider
 
         config = load_config()
@@ -402,6 +403,7 @@ class SessionManager:
                                  else _expand_acp_enabled_toolsets(["hermes-acp"], mcp_server_names=configured_mcp_servers)),
             "disabled_toolsets": list(disabled_toolsets) if disabled_toolsets is not None else None,
             "model": model or default_model,
+            "fallback_model": get_fallback_chain(config) or None,
             "cwd": cwd,
         }
         try:

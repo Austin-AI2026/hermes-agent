@@ -117,6 +117,41 @@ class TestCreateSession:
 
         assert observed["cwd"] == str(workspace)
 
+    @pytest.mark.parametrize(
+        ("fallback_config", "expected"),
+        [
+            (
+                {"fallback_providers": [{"provider": "openai-codex", "model": "gpt-5.6-sol"}]},
+                [{"provider": "openai-codex", "model": "gpt-5.6-sol"}],
+            ),
+            ({"fallback_providers": []}, None),
+            (
+                {"fallback_model": {"provider": "openrouter", "model": "anthropic/claude-sonnet-4.6"}},
+                [{"provider": "openrouter", "model": "anthropic/claude-sonnet-4.6"}],
+            ),
+        ],
+        ids=["configured-chain", "no-fallback", "legacy-fallback-model"],
+    )
+    def test_make_agent_passes_effective_fallback_chain(
+        self, monkeypatch, fallback_config, expected
+    ):
+        seen = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                seen.update(kwargs)
+
+        config = {"model": {"default": "m", "provider": "p"}, "mcp_servers": {}, **fallback_config}
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: config)
+        monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", lambda **_kw: {})
+        monkeypatch.setattr("hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build", lambda **_kw: None)
+        monkeypatch.setattr("acp_adapter.session._register_task_cwd", lambda task_id, cwd: None)
+
+        SessionManager(db=None)._make_agent(session_id="fallback-test", cwd=".")
+
+        assert seen["fallback_model"] == expected
+
     def test_make_agent_prefers_passed_toolsets_over_config_servers(self, monkeypatch):
         """#42719: a rebuild (model switch) passes the live session's toolsets and they are kept
         verbatim; a fresh session still derives them from the config-declared MCP servers."""
