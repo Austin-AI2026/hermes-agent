@@ -14,7 +14,12 @@ from hermes_state import SessionDB
 
 
 def _mock_agent():
-    return MagicMock(name="MockAIAgent")
+    return SimpleNamespace(
+        model="fixture-model",
+        provider="fixture-provider",
+        base_url="https://fixture.invalid",
+        api_mode="chat_completions",
+    )
 
 
 @pytest.fixture()

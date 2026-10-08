@@ -1,6 +1,7 @@
 """Only new, contentless ACP sessions are ephemeral; existing state remains durable."""
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from acp_adapter.session import SessionManager
 from hermes_state import SessionDB
@@ -8,7 +9,12 @@ from hermes_state import SessionDB
 
 def test_new_session_persists_only_when_content_exists(tmp_path):
     db = SessionDB(tmp_path / "state.db")
-    manager = SessionManager(db=db, agent_factory=lambda: SimpleNamespace(model="fixture"))
+    manager = SessionManager(
+        db=db,
+        agent_factory=lambda: SimpleNamespace(
+            model="fixture", provider="fixture-provider", base_url=None, api_mode=None
+        ),
+    )
     state = manager.create_session(cwd=str(tmp_path))
     assert db.get_session(state.session_id) is None
     manager.update_cwd(state.session_id, str(tmp_path / "moved"))
@@ -27,10 +33,23 @@ def test_new_session_persists_only_when_content_exists(tmp_path):
 
 def test_existing_empty_history_still_updates_metadata(tmp_path):
     db = SessionDB(tmp_path / "state.db")
-    manager = SessionManager(db=db, agent_factory=lambda: SimpleNamespace(model="fixture"))
-    # An old, unprompted ACP client may still own its row: source is not liveness.
-    db.create_session(session_id="existing", source="acp", model="original")
-    state = manager.get_session("existing")
+    manager = SessionManager(
+        db=db,
+        agent_factory=lambda: SimpleNamespace(
+            model="fixture", provider="fixture-provider", base_url=None, api_mode=None
+        ),
+    )
+    # A legacy, unprompted ACP client may still own its row: source is not liveness.
+    # Give the legacy row coherent primary-route provenance; ambiguous legacy rows fail closed.
+    db.create_session(
+        session_id="existing", source="acp", model="original",
+        model_config={"provider": "fixture-provider"},
+    )
+    with patch(
+        "hermes_cli.config.load_config",
+        return_value={"model": {"provider": "fixture-provider", "default": "original"}},
+    ):
+        state = manager.get_session("existing")
     assert state is not None
     assert not state.history
     state.model = "selected-model"

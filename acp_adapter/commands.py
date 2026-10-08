@@ -110,6 +110,9 @@ class SlashCommandsMixin:
         try:
             return contextvars.copy_context().run(_dispatch)
         except Exception as e:
+            if cmd == "model":
+                logger.error("Slash command /model failed", exc_info=True)
+                return "Model switch could not be completed. Verify the provider configuration and try again."
             logger.error("Slash command /%s error: %s", cmd, e, exc_info=True)
             return f"Error executing /{cmd}: {e}"
 
