@@ -13,6 +13,11 @@ from acp_adapter.session import SessionState, _expand_acp_enabled_toolsets
 
 logger = logging.getLogger("acp_adapter.server")
 
+
+class ModelSwitchValidationError(ValueError):
+    """Known user-facing /model validation failure safe to return verbatim."""
+
+
 try:
     from hermes_cli import __version__ as HERMES_VERSION
 except Exception:
@@ -109,7 +114,15 @@ class SlashCommandsMixin:
 
         try:
             return contextvars.copy_context().run(_dispatch)
+        except ModelSwitchValidationError as exc:
+            if cmd == "model":
+                logger.warning("ACP /model validation failed: %s", exc)
+                return str(exc) or "Model switch could not be completed."
+            raise
         except Exception as e:
+            if cmd == "model":
+                logger.error("Slash command /model failed", exc_info=True)
+                return "Model switch could not be completed. Verify the provider configuration and try again."
             logger.error("Slash command /%s error: %s", cmd, e, exc_info=True)
             return f"Error executing /{cmd}: {e}"
 
@@ -122,7 +135,7 @@ class SlashCommandsMixin:
     def _cmd_model(self, args: str, state: SessionState) -> str:
         if not args:
             model = state.model or getattr(state.agent, "model", "unknown")
-            provider = getattr(state.agent, "provider", None) or "auto"
+            provider = state.requested_provider or getattr(state.agent, "provider", None) or "auto"
             return f"Current model: {model}\nProvider: {provider}"
 
         current_provider, target_provider, new_model = self._switch_model(state, args)

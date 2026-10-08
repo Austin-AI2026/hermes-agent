@@ -14,7 +14,12 @@ from hermes_state import SessionDB
 
 
 def _mock_agent():
-    return MagicMock(name="MockAIAgent")
+    return SimpleNamespace(
+        model="fixture-model",
+        provider="fixture-provider",
+        base_url="https://fixture.invalid",
+        api_mode="chat_completions",
+    )
 
 
 @pytest.fixture()
@@ -330,7 +335,7 @@ class TestPersistence:
         manager.save_session(state.session_id)
 
         mc = json.loads(db.get_session(state.session_id)["model_config"])
-        assert mc == {"cwd": "/work", "provider": "anthropic",
+        assert mc == {"cwd": "/work", "route_schema": acp_session.ROUTE_SCHEMA, "provider": "anthropic",
                       "base_url": "https://anthropic.example/v1", "api_mode": "anthropic_messages"}
 
 

@@ -24,7 +24,13 @@ def _tmp_db(tmp_path):
 
 
 def _mock_agent():
-    return MagicMock(name="MockAIAgent")
+    return MagicMock(
+        name="MockAIAgent",
+        model="fixture-model",
+        provider="fixture-provider",
+        base_url="https://fixture.invalid/v1",
+        api_mode="chat_completions",
+    )
 
 
 # ---------------------------------------------------------------------------

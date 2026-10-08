@@ -34,10 +34,13 @@ def _acp_agent():
 
 
 def _state(**agent_attrs):
-    return types.SimpleNamespace(
+    from acp_adapter.session import SessionState
+    state = SessionState(
         session_id="s1", cwd=".", model="claude-sonnet-5",
         agent=types.SimpleNamespace(
             provider="anthropic", base_url="https://api.anthropic.com", api_key="k", **agent_attrs))
+    state.bind_requested_route()
+    return state
 
 
 def test_acp_and_dashboard_reject_what_switch_model_rejects(monkeypatch):

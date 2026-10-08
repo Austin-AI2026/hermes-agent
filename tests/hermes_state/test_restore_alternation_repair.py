@@ -68,7 +68,10 @@ def test_repaired_load_is_stable_under_prerequest_repair(db):
 
 
 def _seed_wedged_acp_session(db, session_id="acp1"):
-    db.create_session(session_id, "acp")
+    db.create_session(
+        session_id, "acp", model="stub",
+        model_config={"route_schema": 2, "provider": "stub-provider"},
+    )
     db.append_message(session_id=session_id, role="user", content="first ask")
     db.append_message(session_id=session_id, role="assistant", content="first reply")
     db.append_message(session_id=session_id, role="user", content="unanswered turn")
