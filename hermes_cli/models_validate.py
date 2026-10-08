@@ -116,8 +116,8 @@ def _validate_moa(req: _Request) -> dict[str, Any]:
         if req.requested in cfg["presets"]:
             return _accept()
         return _reject(f"MoA preset `{req.requested}` was not found. Run `hermes moa list`.")
-    except Exception as exc:
-        return _reject(f"Could not read MoA presets: {exc}")
+    except Exception:
+        return _reject("Could not read MoA presets. Verify the MoA configuration and try again.")
 
 
 def _reject_whitespace(req: _Request) -> Optional[dict[str, Any]]:

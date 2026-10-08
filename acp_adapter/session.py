@@ -174,7 +174,7 @@ def _resolve_persisted_route(meta: dict, row: dict, model: str | None) -> tuple[
         for entry in fallback_config
     ]
 
-    if primary and live == primary:
+    if primary and live == primary and model == cfg_model:
         return provider, base_url, api_mode
     if model != cfg_model and any(p == live and fallback_model == model for p, fallback_model in fallback_entries):
         return provider, base_url, api_mode

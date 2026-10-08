@@ -15,15 +15,18 @@ from unittest.mock import patch
 import acp
 import pytest
 
+from acp_adapter.commands import ModelSwitchValidationError
 from acp_adapter.server import HermesACPAgent
 from acp_adapter.session import SessionManager, SessionRouteError, SessionState
 from hermes_state import SessionDB
 
 PRIMARY = ("nous", "nvidia/nemotron-3-super-120b-a12b")
 FALLBACK = ("openai-codex", "gpt-5.6-sol")
+NON_PRIMARY = ("openrouter", "anthropic/claude-sonnet-4.5")
 ROUTES = {
     "nous": ("https://inference-api.nousresearch.com/v1", "chat_completions"),
     "openai-codex": ("https://chatgpt.com/backend-api/codex", "codex_responses"),
+    "openrouter": ("https://openrouter.ai/api/v1", "chat_completions"),
 }
 CONFIG = {
     "model": {"provider": PRIMARY[0], "default": PRIMARY[1]},
@@ -173,6 +176,28 @@ def test_fork_during_fallback_inherits_the_requested_route(env):
     forked = manager.fork_session(state.session_id)
     assert (forked.agent.provider, forked.agent.model) == PRIMARY
     assert requested(forked) == primary_route()
+
+
+def test_fork_after_explicit_non_primary_switch_and_live_fallback_retains_selected_route(env):
+    manager, state = env.new_session()
+    env.fallback_during_construction = True
+    _switch(state, manager, NON_PRIMARY, {})
+
+    assert (state.agent.provider, state.agent.model) == FALLBACK
+    assert requested(state) == (NON_PRIMARY[0], NON_PRIMARY[1], *ROUTES[NON_PRIMARY[0]])
+
+    forked = manager.fork_session(state.session_id)
+    assert (forked.agent.provider, forked.agent.model) == FALLBACK
+    assert requested(forked) == (NON_PRIMARY[0], NON_PRIMARY[1], *ROUTES[NON_PRIMARY[0]])
+    assert env.row_route(forked.session_id) == (NON_PRIMARY[1], NON_PRIMARY[0], *ROUTES[NON_PRIMARY[0]])
+
+    manager.save_session(forked.session_id)
+    env.fallback_during_construction = False
+    restored = env.manager().get_session(forked.session_id)
+
+    assert (restored.agent.provider, restored.agent.model) == NON_PRIMARY
+    assert requested(restored) == (NON_PRIMARY[0], NON_PRIMARY[1], *ROUTES[NON_PRIMARY[0]])
+    assert env.row_route(restored.session_id) == (NON_PRIMARY[1], NON_PRIMARY[0], *ROUTES[NON_PRIMARY[0]])
 
 
 def test_fork_construction_failure_is_wrapped_as_session_route_error(env):
@@ -398,6 +423,39 @@ def test_requested_route_credential_resolution_failure_is_controlled_and_transac
     assert (state.agent.provider, state.agent.model) == FALLBACK
 
 
+def test_explicit_cross_provider_switch_does_not_require_old_provider_credentials(env):
+    manager, state = env.new_session()
+    activate_fallback(state)
+    seen = {}
+
+    def resolve_target_only(requested=None, **_kwargs):
+        if requested == PRIMARY[0]:
+            raise RuntimeError("old requested provider credentials unavailable")
+        assert requested == FALLBACK[0]
+        base_url, api_mode = ROUTES[requested]
+        return {
+            "provider": requested,
+            "base_url": base_url,
+            "api_mode": api_mode,
+            "api_key": f"key-{requested}",
+            "command": None,
+            "args": [],
+        }
+
+    with patch(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        side_effect=resolve_target_only,
+    ):
+        result = _switch(state, manager, FALLBACK, seen)
+
+    assert result == (PRIMARY[0], FALLBACK[0], FALLBACK[1])
+    assert seen["explicit_provider"] == FALLBACK[0]
+    assert seen["current_provider"] == PRIMARY[0]
+    assert seen["current_api_key"] == ""
+    assert requested(state) == (FALLBACK[0], FALLBACK[1], *ROUTES[FALLBACK[0]])
+    assert env.row_route(state.session_id) == (FALLBACK[1], FALLBACK[0], *ROUTES[FALLBACK[0]])
+
+
 # ---- legacy migration -----------------------------------------------------------------------------
 
 def _legacy_row(env, *, model, provider, session_id="legacy-1"):
@@ -428,6 +486,22 @@ def test_legacy_hybrid_row_that_cannot_be_attributed_fails_closed_before_any_age
     with pytest.raises(SessionRouteError, match="ambiguous legacy route"):
         env.manager().get_session(sid)
     assert env.built == []  # nothing was constructed, so nothing could reach a provider
+
+
+def test_legacy_provider_match_to_current_primary_cannot_launder_unknown_model_to_schema_two(env, monkeypatch):
+    configured = json.loads(json.dumps(CONFIG))
+    configured["model"] = {"provider": FALLBACK[0], "default": FALLBACK[1]}
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: json.loads(json.dumps(configured)))
+    sid = _legacy_row(env, model=PRIMARY[1], provider=FALLBACK[0])
+
+    with pytest.raises(SessionRouteError, match="ambiguous legacy route"):
+        env.manager().get_session(sid)
+
+    row = env.db.get_session(sid)
+    metadata = json.loads(row["model_config"])
+    assert metadata.get("route_schema") is None
+    assert (row["model"], metadata["provider"]) == (PRIMARY[1], FALLBACK[0])
+    assert env.built == []
 
 
 @pytest.mark.parametrize("model, provider", [
@@ -498,6 +572,68 @@ def test_slash_model_sanitizes_switch_failure(env):
     assert requested(state) == primary_route()
 
 
+def test_slash_model_preserves_safe_actionable_validation_error(env):
+    manager, state = env.new_session()
+    server = HermesACPAgent(session_manager=manager)
+    message = "Unknown provider 'missing-provider'. Pick a connected provider in /model."
+
+    with patch.object(server, "_switch_model", side_effect=ModelSwitchValidationError(message)):
+        result = server._handle_slash_command("/model missing-provider:model", state)
+
+    assert result == message
+    assert requested(state) == primary_route()
+
+
+def test_slash_model_strips_provider_exception_details_from_validation_error(env):
+    manager, state = env.new_session()
+    server = HermesACPAgent(session_manager=manager)
+    failure = SimpleNamespace(
+        success=False,
+        error_message=(
+            "OpenRouter is not connected: no API key or login was found for it. "
+            "Add one with `hermes auth add openrouter`, or pick a connected provider in /model.\n"
+            "  Details: SECRETMARKER raw credential exception"
+        ),
+    )
+
+    with patch("hermes_cli.model_switch.switch_model", return_value=failure):
+        result = server._handle_slash_command("/model openrouter:model", state)
+
+    assert result is not None
+    assert "OpenRouter is not connected" in result
+    assert "hermes auth add openrouter" in result
+    assert "SECRETMARKER" not in result
+    assert "Details:" not in result
+    assert requested(state) == primary_route()
+
+
+def test_slash_model_sanitizes_raw_model_validation_exception(env):
+    manager, state = env.new_session()
+    server = HermesACPAgent(session_manager=manager)
+    failure = SimpleNamespace(
+        success=False,
+        error_message="Could not validate `target-model`: SECRETMARKER endpoint credential exception",
+    )
+
+    with patch("hermes_cli.model_switch.switch_model", return_value=failure):
+        result = server._handle_slash_command("/model openrouter:target-model", state)
+
+    assert result == "Could not validate `target-model`. Verify the provider connection and try again."
+    assert "SECRETMARKER" not in result
+    assert requested(state) == primary_route()
+
+
+def test_slash_model_sanitizes_session_route_error(env):
+    manager, state = env.new_session()
+    server = HermesACPAgent(session_manager=manager)
+    with patch.object(server, "_switch_model", side_effect=SessionRouteError("SECRETMARKER credential detail")):
+        result = server._handle_slash_command(f"/model {FALLBACK[1]}", state)
+    assert result is not None
+    assert "SECRETMARKER" not in result
+    assert "could not be completed" in result
+    assert requested(state) == primary_route()
+
+
 @pytest.mark.parametrize(
     ("failure", "expected_code"),
     [
@@ -517,6 +653,34 @@ def test_set_session_model_sanitizes_all_switch_failures(env, failure, expected_
     assert "SECRETMARKER" not in str(raised.value)
     assert raised.value.data == {"session_id": state.session_id}
     assert requested(state) == primary_route()
+
+
+def test_new_session_route_failure_is_actionable_and_sanitized():
+    manager = SessionManager(agent_factory=lambda: SimpleNamespace())
+    server = HermesACPAgent(session_manager=manager)
+    with patch.object(manager, "create_session", side_effect=SessionRouteError("SECRETMARKER credential detail")):
+        with pytest.raises(acp.RequestError) as raised:
+            asyncio.run(server.new_session(cwd="/work"))
+
+    assert raised.value.code == -32003
+    assert "Cannot safely restore ACP session route" in str(raised.value)
+    assert "SECRETMARKER" not in str(raised.value)
+    assert raised.value.data == {"session_id": None}
+
+
+def test_resume_missing_session_creation_route_failure_is_actionable_and_sanitized():
+    manager = SessionManager(agent_factory=lambda: SimpleNamespace())
+    server = HermesACPAgent(session_manager=manager)
+    with patch.object(manager, "update_cwd", return_value=None), patch.object(
+        manager, "create_session", side_effect=SessionRouteError("SECRETMARKER provider detail")
+    ):
+        with pytest.raises(acp.RequestError) as raised:
+            asyncio.run(server.resume_session(cwd="/work", session_id="missing"))
+
+    assert raised.value.code == -32003
+    assert "Cannot safely restore ACP session route" in str(raised.value)
+    assert "SECRETMARKER" not in str(raised.value)
+    assert raised.value.data == {"session_id": "missing"}
 
 
 @pytest.mark.parametrize(

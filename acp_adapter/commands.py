@@ -13,6 +13,11 @@ from acp_adapter.session import SessionState, _expand_acp_enabled_toolsets
 
 logger = logging.getLogger("acp_adapter.server")
 
+
+class ModelSwitchValidationError(ValueError):
+    """Known user-facing /model validation failure safe to return verbatim."""
+
+
 try:
     from hermes_cli import __version__ as HERMES_VERSION
 except Exception:
@@ -109,6 +114,11 @@ class SlashCommandsMixin:
 
         try:
             return contextvars.copy_context().run(_dispatch)
+        except ModelSwitchValidationError as exc:
+            if cmd == "model":
+                logger.warning("ACP /model validation failed: %s", exc)
+                return str(exc) or "Model switch could not be completed."
+            raise
         except Exception as e:
             if cmd == "model":
                 logger.error("Slash command /model failed", exc_info=True)

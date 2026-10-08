@@ -25,7 +25,7 @@ from acp.schema import (
 )
 
 from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID, build_auth_methods, detect_provider
-from acp_adapter.commands import HERMES_VERSION, SlashCommandsMixin, _estimate_tokens
+from acp_adapter.commands import HERMES_VERSION, ModelSwitchValidationError, SlashCommandsMixin, _estimate_tokens
 from acp_adapter.content import PromptBlock, _content_blocks_to_openai_user_content, _extract_text
 from acp_adapter.events import (
     AssistantMessageIdAllocator, _build_plan_update_from_todo_result, _send_update, flush_open_tool_calls,
@@ -253,9 +253,11 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         self._conn: Optional[acp.Client] = None
 
     @staticmethod
-    def _route_request_error(session_id: str, exc: SessionRouteError) -> acp.RequestError:
+    def _route_request_error(session_id: str | None, _exc: SessionRouteError) -> acp.RequestError:
         return acp.RequestError(
-            -32003, f"Cannot safely restore ACP session route: {exc}", {"session_id": session_id}
+            -32003,
+            "Cannot safely restore ACP session route. Start a new session or select the intended provider again.",
+            {"session_id": session_id},
         )
 
     def _get_session(self, session_id: str) -> SessionState | None:
@@ -343,7 +345,9 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         explicit_provider, model_input = parse_model_input(raw_model, "")
         cfg = load_config()
         current_api_key = str(getattr(state.agent, "api_key", "") or "") if live_is_requested else ""
-        if not live_is_requested and current_provider:
+        if not live_is_requested and current_provider and (
+            not explicit_provider or explicit_provider == current_provider
+        ):
             from hermes_cli.runtime_provider import resolve_runtime_provider
 
             try:
@@ -358,7 +362,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                     current_provider,
                     exc_info=True,
                 )
-                raise ValueError(
+                raise ModelSwitchValidationError(
                     f"Cannot resolve credentials for requested provider {current_provider!r}. "
                     "Reconnect or reconfigure that provider before switching models."
                 ) from exc
@@ -371,7 +375,14 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             user_providers=cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {},
             custom_providers=get_compatible_custom_providers(cfg))
         if not result.success:
-            raise ValueError(result.error_message or f"Cannot switch to {raw_model}")
+            message = result.error_message or f"Cannot switch to {raw_model}"
+            # ``switch_model`` may append a raw provider exception after this marker. The
+            # actionable prefix is safe for ACP clients; transport/credential details are not.
+            message = message.split("\n  Details:", 1)[0].rstrip()
+            if message.startswith("Could not validate `") and "`:" in message:
+                model_label = message.removeprefix("Could not validate `").split("`:", 1)[0]
+                message = f"Could not validate `{model_label}`. Verify the provider connection and try again."
+            raise ModelSwitchValidationError(message)
         target_provider, new_model = result.target_provider, result.new_model
         endpoint: dict[str, Any] = {}
         if keep_endpoint and not (current_provider and target_provider != current_provider):
@@ -640,7 +651,10 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         logger.info(log, *log_args)
 
     async def new_session(self, cwd: str, mcp_servers: list | None = None, **kwargs: Any) -> NewSessionResponse:
-        state = self.session_manager.create_session(cwd=cwd)
+        try:
+            state = self.session_manager.create_session(cwd=cwd)
+        except SessionRouteError as exc:
+            raise self._route_request_error(None, exc) from exc
         await self._attach_session_mcp(state, mcp_servers, "New session %s (cwd=%s)", state.session_id, cwd)
         return NewSessionResponse(session_id=state.session_id, **await self._session_response_fields(state))
 
@@ -666,7 +680,10 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             raise self._route_request_error(session_id, exc) from exc
         if state is None:
             logger.warning("resume_session: session %s not found, creating new", session_id)
-            state = self.session_manager.create_session(cwd=cwd)
+            try:
+                state = self.session_manager.create_session(cwd=cwd)
+            except SessionRouteError as exc:
+                raise self._route_request_error(session_id, exc) from exc
         await self._attach_session_mcp(state, mcp_servers, "Resumed session %s", state.session_id)
         return ResumeSessionResponse(**await self._session_response_fields(state, "resume"))
 

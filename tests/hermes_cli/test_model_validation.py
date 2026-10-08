@@ -33,6 +33,18 @@ def _validate(model, provider="openrouter", api_models=FAKE_API_MODELS, **kw):
         return validate_requested_model(model, provider, **kw)
 
 
+def test_moa_validation_config_failure_does_not_expose_raw_exception():
+    with patch(
+        "hermes_cli.config.load_config",
+        side_effect=RuntimeError("SECRETMARKER raw config credential detail"),
+    ):
+        result = validate_requested_model("default", "moa")
+
+    assert result["accepted"] is False
+    assert result["message"] == "Could not read MoA presets. Verify the MoA configuration and try again."
+    assert "SECRETMARKER" not in result["message"]
+
+
 # -- parse_model_input -------------------------------------------------------
 
 class TestParseModelInput:
